@@ -1,4 +1,4 @@
-// ===== I-EDIT DITO =====
+
 const HER_NAME = "Baby ko";
 
 const TRACKS = [
@@ -13,18 +13,24 @@ const MAIN_LETTER = {
 
 const WORDS = ["hi baby", "mwaaaaaa", "pakisss", "sakin lang ikawwww", "labyuu", "ganda moo", "cutee mo so muchhhh", "sakin kalang uli", "syimpri sayo lang din aku", "mwaaaaa", "mwaaaa mwaaa", "mwaaaaa", "i love you", "hehehehe"];
 
-// =======================
+
 
 const $ = id => document.getElementById(id);
 $("herName").textContent = HER_NAME;
 
+
+const IOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+if (IOS) document.documentElement.classList.add("ios");
+
+const FX = !IOS && location.protocol !== "file:";
+
 const modal = $("modal");
 modal.addEventListener("click", e => { if (e.target === modal) modal.close(); });
 
-// Player
+
 const audio = $("audio"), wave = $("wave"), play = $("play"), seek = $("seek");
 let idx = 0;
-let unlocked = false;
+let scrubbing = false;
 
 for (let i = 0; i < 30; i++) wave.append(document.createElement("i"));
 const fmt = s => isNaN(s) ? "0:00" : Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
@@ -37,31 +43,52 @@ function load(i) {
     $("artist").textContent = "Wala pang mp3 sa " + t.src;
     setPlaying(false);
   };
-  audio.src = t.src;
+  audio.src = encodeURI(t.src); // may space sa filename
   const img = new Image();
   img.onload = () => {
-    $("cover").style.backgroundImage = `url(${t.cover})`;
+    $("cover").style.backgroundImage = `url("${encodeURI(t.cover)}")`;
     $("cover").classList.add("has");
   };
   img.src = t.cover;
+
+  if ("mediaSession" in navigator && window.MediaMetadata) {
+    navigator.mediaSession.metadata = new MediaMetadata({
+      title: t.title, artist: t.artist, artwork: [{ src: t.cover }]
+    });
+  }
 }
 
-// Music visualizer
+if ("mediaSession" in navigator) {
+  const ms = navigator.mediaSession;
+  try {
+    ms.setActionHandler("play", () => unlockAndPlay());
+    ms.setActionHandler("pause", () => audio.pause());
+    ms.setActionHandler("previoustrack", () => step(-1));
+    ms.setActionHandler("nexttrack", () => step(1));
+  } catch (e) {}
+}
+
+
 let ac, an, data, raf;
 function initAudio() {
   if (ac) return;
-  ac = new (window.AudioContext || window.webkitAudioContext)();
-  an = ac.createAnalyser();
-  an.fftSize = 128;
-  an.smoothingTimeConstant = 0.8;
-  // createMediaElementSource ONCE only — before any play()
-  ac.createMediaElementSource(audio).connect(an);
-  an.connect(ac.destination);
-  data = new Uint8Array(an.frequencyBinCount);
+  try {
+    ac = new (window.AudioContext || window.webkitAudioContext)();
+    an = ac.createAnalyser();
+    an.fftSize = 128;
+    an.smoothingTimeConstant = 0.8;
+    
+    ac.createMediaElementSource(audio).connect(an);
+    an.connect(ac.destination);
+    data = new Uint8Array(an.frequencyBinCount);
+  } catch (e) {
+    an = null;
+  }
 }
 
 function draw() {
   raf = requestAnimationFrame(draw);
+  if (!wave.offsetParent) return; 
   const bars = wave.childNodes;
   if (an) {
     an.getByteFrequencyData(data);
@@ -75,7 +102,8 @@ function draw() {
 }
 
 function setPlaying(on) {
-  play.textContent = on ? "❚❚" : "▶";
+  play.classList.toggle("on", on);
+  play.setAttribute("aria-label", on ? "Pause" : "Play");
   cancelAnimationFrame(raf);
   if (on) {
     draw();
@@ -84,41 +112,30 @@ function setPlaying(on) {
   }
 }
 
-// Unlock AudioContext + start song (always create graph BEFORE play)
+
 function unlockAndPlay() {
-  if (location.protocol !== "file:") {
+  if (FX) {
     initAudio();
-    if (ac.state === "suspended") ac.resume();
+    if (ac && ac.state === "suspended") ac.resume();
   }
-  unlocked = true;
-
-  // remove one-time listeners
   document.removeEventListener("click", onFirstInteract);
-  document.removeEventListener("touchstart", onFirstInteract);
   document.removeEventListener("keydown", onFirstInteract);
-
   if (audio.paused) {
-    audio.play().catch(() => {});
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => setPlaying(false));
   }
 }
 
-function onFirstInteract() {
-  unlockAndPlay();
-}
+function onFirstInteract() { unlockAndPlay(); }
 
-// First click / tap / key anywhere → unlock + play (once)
+
 document.addEventListener("click", onFirstInteract, { once: true });
-document.addEventListener("touchstart", onFirstInteract, { once: true, passive: true });
 document.addEventListener("keydown", onFirstInteract, { once: true });
 
-// Play / Pause button — no double play
 play.onclick = (e) => {
-  e.stopPropagation(); // para di ma-trigger yung document listener
-  if (audio.paused) {
-    unlockAndPlay();
-  } else {
-    audio.pause();
-  }
+  e.stopPropagation();
+  if (audio.paused) unlockAndPlay();
+  else audio.pause();
 };
 
 audio.onplay = () => setPlaying(true);
@@ -126,21 +143,24 @@ audio.onpause = () => setPlaying(false);
 audio.onloadedmetadata = () => $("dur").textContent = fmt(audio.duration);
 audio.ontimeupdate = () => {
   $("cur").textContent = fmt(audio.currentTime);
-  seek.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
+  if (!scrubbing) seek.value = audio.duration ? (audio.currentTime / audio.duration) * 100 : 0;
 };
 audio.onended = () => step(1, true);
 
+seek.addEventListener("pointerdown", () => { scrubbing = true; });
+["pointerup", "pointercancel", "change"].forEach(ev => seek.addEventListener(ev, () => { scrubbing = false; }));
 seek.oninput = () => {
   if (audio.duration) audio.currentTime = (seek.value / 100) * audio.duration;
 };
-$("vol").oninput = e => audio.volume = e.target.value;
-audio.volume = 0.7;
+$("vol").oninput = e => audio.volume = e.target.value; 
+if (!IOS) audio.volume = 0.7;
 
 function step(d, auto) {
   idx = (idx + d + TRACKS.length) % TRACKS.length;
   load(idx);
   if (auto || !audio.paused) {
-    audio.play().catch(() => {});
+    const p = audio.play();
+    if (p && p.catch) p.catch(() => setPlaying(false));
   }
 }
 $("prev").onclick = (e) => { e.stopPropagation(); step(-1); };
@@ -148,7 +168,7 @@ $("next").onclick = (e) => { e.stopPropagation(); step(1); };
 
 load(0);
 
-// Main letter button (center of heart)
+
 $("openLetter").onclick = () => {
   $("mTitle").textContent = MAIN_LETTER.title;
   $("mDate").textContent = MAIN_LETTER.date;
@@ -156,27 +176,39 @@ $("openLetter").onclick = () => {
   modal.showModal();
 };
 
-// 3D scene: particle heart over a spiral galaxy, orbiting words, rising hearts
+
 (function () {
   const cv = $("heart"), btn = $("openLetter"), T = THREE, TAU = Math.PI * 2, rnd = Math.random;
   const still = matchMedia("(prefers-reduced-motion: reduce)").matches;
-  const r = new T.WebGLRenderer({ canvas: cv, alpha: true, antialias: true });
-  r.setPixelRatio(Math.min(devicePixelRatio, 2));
+
+  
+  const coarse = matchMedia("(pointer: coarse)").matches;
+  const Q = Math.min(innerWidth, innerHeight) < 700 ? 0.5 : coarse ? 0.75 : 1;
+  const SZ = 1 + (1 - Q) * 0.6; 
+
+  let r;
+  try {
+    r = new T.WebGLRenderer({ canvas: cv, alpha: true, antialias: Q === 1 });
+  } catch (e) { return; } 
+  cv.addEventListener("webglcontextlost", e => e.preventDefault());
+  const maxDPR = Q < 1 ? 1.5 : 2;
+  r.setPixelRatio(Math.min(devicePixelRatio || 1, maxDPR));
+
   const scene = new T.Scene(), cam = new T.PerspectiveCamera(50, 1, 0.1, 200);
   const HEART_Y = 5.6;
 
-  // round soft sprite
+ 
   const c2 = document.createElement("canvas"); c2.width = c2.height = 64;
   const g = c2.getContext("2d"), gr = g.createRadialGradient(32, 32, 0, 32, 32, 32);
   gr.addColorStop(0, "#fff"); gr.addColorStop(0.25, "rgba(255,255,255,.7)"); gr.addColorStop(1, "rgba(255,255,255,0)");
   g.fillStyle = gr; g.fillRect(0, 0, 64, 64);
   const DOT = new T.CanvasTexture(c2);
-  const mat = (size, op = 1) => new T.PointsMaterial({ size, map: DOT, vertexColors: true, transparent: true, opacity: op, depthWrite: false, blending: T.AdditiveBlending });
+  const mat = (size, op = 1) => new T.PointsMaterial({ size: size * SZ, map: DOT, vertexColors: true, transparent: true, opacity: op, depthWrite: false, blending: T.AdditiveBlending });
   const geo = (p, c) => { const b = new T.BufferGeometry(); b.setAttribute("position", new T.BufferAttribute(p, 3)); b.setAttribute("color", new T.BufferAttribute(c, 3)); return b; };
   const glowSprite = (color, op, w, h, y) => { const s = new T.Sprite(new T.SpriteMaterial({ map: DOT, color, transparent: true, opacity: op, blending: T.AdditiveBlending, depthWrite: false })); s.scale.set(w, h, 1); s.position.y = y; scene.add(s); return s; };
 
-  // heart
-  const HN = 11000, hp = new Float32Array(HN * 3), hc = new Float32Array(HN * 3);
+
+  const HN = Math.round(11000 * Q), hp = new Float32Array(HN * 3), hc = new Float32Array(HN * 3);
   const hcol = ["#ff3d8b", "#ff9cc4", "#ffffff"].map(c => new T.Color(c));
   for (let i = 0; i < HN; i++) {
     const t = rnd() * TAU, x = 16 * Math.pow(Math.sin(t), 3), y = 13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t);
@@ -187,8 +219,8 @@ $("openLetter").onclick = () => {
   const heart = new T.Points(geo(hp, hc), mat(0.085)); heart.position.y = HEART_Y; scene.add(heart);
   const halo = glowSprite(0xff2f7f, 0.35, 11, 11, HEART_Y);
 
-  // galaxy vortex
-  const GN = 30000, gp = new Float32Array(GN * 3), gc = new Float32Array(GN * 3);
+ 
+  const GN = Math.round(30000 * Q), gp = new Float32Array(GN * 3), gc = new Float32Array(GN * 3);
   const ci = new T.Color("#ffe3ef"), cm = new T.Color("#ff3d8b"), co = new T.Color("#7a1046");
   for (let i = 0; i < GN; i++) {
     const rad = Math.pow(rnd(), 1.7) * 17 + 0.7, ang = (i % 3) / 3 * TAU + rad * 0.42, sp = 0.25 + rad * 0.09;
@@ -199,7 +231,7 @@ $("openLetter").onclick = () => {
   const galaxy = new T.Points(geo(gp, gc), mat(0.075, 0.9)); scene.add(galaxy);
   glowSprite(0xff5fa5, 0.75, 5, 2.2, 0);
 
-  // background stars
+
   const SN = 900, sp = new Float32Array(SN * 3), sc = new Float32Array(SN * 3);
   for (let i = 0; i < SN; i++) {
     const d = 25 + rnd() * 40, a = rnd() * TAU, b = Math.acos(2 * rnd() - 1);
@@ -208,56 +240,95 @@ $("openLetter").onclick = () => {
   }
   scene.add(new T.Points(geo(sp, sc), mat(0.22, 0.6)));
 
-  // orbiting words
+
   const words = [];
+  const WFONT = 'italic 700 54px "Cormorant Garamond",serif';
   function label(text) {
-    const k = document.createElement("canvas"), x = k.getContext("2d"), f = 'italic 700 54px "Cormorant Garamond",serif';
-    x.font = f; k.width = Math.ceil(x.measureText(text).width) + 40; k.height = 90; x.font = f; x.textBaseline = "middle";
+    const k = document.createElement("canvas"), x = k.getContext("2d");
+    x.font = WFONT; k.width = Math.ceil(x.measureText(text).width) + 40; k.height = 90; x.font = WFONT; x.textBaseline = "middle";
     x.shadowColor = "#ff2f7f"; x.shadowBlur = 18; x.fillStyle = "#ffd6e6"; x.fillText(text, 20, 47);
     const s = new T.Sprite(new T.SpriteMaterial({ map: new T.CanvasTexture(k), transparent: true, depthWrite: false }));
     s.scale.set(k.width / 90 * 0.62, 0.62, 1); return s;
   }
   function buildWords() {
-    words.forEach(w => scene.remove(w.s)); words.length = 0;
+    words.forEach(w => { scene.remove(w.s); w.s.material.map.dispose(); w.s.material.dispose(); }); words.length = 0;
     const n = WORDS.length * 2;
     for (let i = 0; i < n; i++) {
       const s = label(WORDS[i % WORDS.length]); scene.add(s);
       words.push({ s, r: 4.5 + i / n * 12 + rnd() * 1.2, a: rnd() * TAU, v: (0.09 + rnd() * 0.05) / Math.sqrt(4 + i * 0.5), y: 0.4 + rnd() * 1.6 });
     }
   }
-  buildWords(); if (document.fonts) document.fonts.ready.then(buildWords);
+  buildWords();
+  
+  if (document.fonts && document.fonts.load) {
+    Promise.all([document.fonts.load(WFONT, "abc"), document.fonts.ready]).then(buildWords).catch(() => {});
+  }
 
-  // rising mini hearts
+  
   const hk = document.createElement("canvas"); hk.width = hk.height = 64;
   const hx = hk.getContext("2d"); hx.fillStyle = "#ff4d94"; hx.shadowColor = "#ff2f7f"; hx.shadowBlur = 10;
   hx.beginPath(); hx.moveTo(32, 54); hx.bezierCurveTo(4, 34, 10, 8, 32, 20); hx.bezierCurveTo(54, 8, 60, 34, 32, 54); hx.fill();
   const HT = new T.CanvasTexture(hk), mini = [];
-  for (let i = 0; i < 34; i++) {
+  const MN = Q < 1 ? 22 : 34;
+  for (let i = 0; i < MN; i++) {
     const s = new T.Sprite(new T.SpriteMaterial({ map: HT, transparent: true, depthWrite: false })); scene.add(s);
     mini.push({ s, a: rnd() * TAU, r: 3 + rnd() * 13, y: rnd() * 9, v: 0.25 + rnd() * 0.5, sz: 0.3 + rnd() * 0.5, ph: rnd() * TAU });
   }
 
-  // camera orbit
-  let th = 0, ph = 1.2, dist = 20, tth = 0, tph = 1.2, tdist = 20, drag = false, lx = 0, ly = 0, idle = 0;
-  cv.addEventListener("pointerdown", e => { drag = true; lx = e.clientX; ly = e.clientY; cv.setPointerCapture(e.pointerId); });
-  cv.addEventListener("pointerup", () => { drag = false; idle = 0; });
+ 
+  let th = 0, ph = 1.2, dist = 20, tth = 0, tph = 1.2, tdist = 20, drag = false, lx = 0, ly = 0, idle = 0, pinch = 0;
+  const ptrs = new Map();
+  const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
+  const pdist = () => { const [a, b] = [...ptrs.values()]; return Math.hypot(a.x - b.x, a.y - b.y) || 1; };
+
+  cv.addEventListener("pointerdown", e => {
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    lx = e.clientX; ly = e.clientY;
+    drag = ptrs.size === 1;
+    if (ptrs.size === 2) pinch = pdist();
+    try { cv.setPointerCapture(e.pointerId); } catch (err) {}
+  });
+  const endPtr = e => {
+    ptrs.delete(e.pointerId);
+    idle = 0;
+    if (ptrs.size === 1) { const p = [...ptrs.values()][0]; lx = p.x; ly = p.y; drag = true; }
+    else drag = false;
+  };
+  cv.addEventListener("pointerup", endPtr);
+  cv.addEventListener("pointercancel", endPtr);
   cv.addEventListener("pointermove", e => {
+    if (!ptrs.has(e.pointerId)) return;
+    ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (ptrs.size === 2) {
+      const d = pdist();
+      tdist = clamp(tdist * pinch / d, 11, 32);
+      pinch = d;
+      return;
+    }
     if (!drag) return;
     tth -= (e.clientX - lx) * 0.006;
-    tph = Math.min(1.5, Math.max(0.55, tph - (e.clientY - ly) * 0.005));
+    tph = clamp(tph - (e.clientY - ly) * 0.005, 0.55, 1.5);
     lx = e.clientX; ly = e.clientY;
   });
   cv.addEventListener("wheel", e => {
     e.preventDefault();
-    tdist = Math.min(32, Math.max(11, tdist + e.deltaY * 0.01));
+    tdist = clamp(tdist + e.deltaY * 0.01, 11, 32);
   }, { passive: false });
 
+  
+  let portrait = null;
   function fit() {
     const w = cv.clientWidth, h = cv.clientHeight;
+    if (!w || !h) return;
+    r.setPixelRatio(Math.min(devicePixelRatio || 1, maxDPR));
     r.setSize(w, h, false); cam.aspect = w / h; cam.updateProjectionMatrix();
-    tdist = dist = w / h < 0.8 ? 27 : 20;
+    const p = w / h < 0.8;
+    if (p !== portrait) { portrait = p; tdist = dist = p ? 27 : 20; } 
   }
-  addEventListener("resize", fit); fit();
+  if (window.ResizeObserver) new ResizeObserver(fit).observe(cv);
+  addEventListener("resize", fit);
+  addEventListener("orientationchange", () => setTimeout(fit, 250));
+  fit();
 
   const clock = new T.Clock(), v3 = new T.Vector3();
   let last = 0;
@@ -279,7 +350,7 @@ $("openLetter").onclick = () => {
         m.s.material.opacity = Math.max(0, Math.min(1, m.y / 1.5, (10 - m.y) / 3)) * 0.9;
         m.s.scale.setScalar(m.sz);
       });
-      idle += dt; if (!drag && idle > 3) tth += dt * 0.05;
+      idle += dt; if (!drag && ptrs.size === 0 && idle > 3) tth += dt * 0.05;
     } else {
       words.forEach(w => w.s.position.set(Math.cos(w.a) * w.r, w.y, Math.sin(w.a) * w.r));
     }
